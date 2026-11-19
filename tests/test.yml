@@ -1,0 +1,21 @@
+#!/usr/bin/ansible-playbook
+---
+- name: Controller-only input validation for tuxbull.zabbix_server
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    ansible_distribution: Rocky
+    ansible_distribution_major_version: "10"
+    ansible_selinux:
+      status: enabled
+      mode: enforcing
+    zabbix_integration_database_password: controller_only-placeholder-123
+    zabbix_integration_admin_password: controller_only-placeholder-456
+    zabbix_integration_admin_bootstrap: false
+    zabbix_integration_server_release: "21-release1.el10"
+    zabbix_integration_web_release: "21-release1.el10"
+    zabbix_integration_agent_release: "21-release1.el10"
+    zabbix_integration_validation_only: true
+  roles:
+    - role: tuxbull.zabbix_server

@@ -1,0 +1,14 @@
+---
+- name: Install the Zabbix server
+  hosts: zabbix_servers
+  become: true
+  vars_files:
+    - vault.yml
+  roles:
+    - role: tuxbull.zabbix_server
+  vars:
+    zabbix_integration_database_password: "{{ vault_zabbix_database_password }}"
+    zabbix_integration_admin_password: "{{ vault_zabbix_admin_password }}"
+    zabbix_integration_server_release: 21-release1.el10
+    zabbix_integration_web_release: 21-release1.el10
+    zabbix_integration_agent_release: 21-release1.el10

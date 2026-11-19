@@ -1,0 +1,73 @@
+---
+- name: Require explicit Admin bootstrap authorization for publication
+  ansible.builtin.assert:
+    that:
+      - not (zabbix_integration_publish | bool) or (zabbix_integration_admin_bootstrap | bool)
+    fail_msg: >-
+      Direct HTTPS publication requires Admin bootstrap authorization and its
+      successful stage-65 API verification.
+
+- name: Confirm exactly one loopback frontend socket owned by nginx
+  ansible.builtin.command:
+    argv: [ss, -H, -lntp]
+  register: _zabbix_integration_frontend_listener
+  changed_when: false
+  failed_when: >-
+    _zabbix_integration_frontend_listener.rc != 0 or
+    _zabbix_integration_frontend_listener.stdout_lines |
+    select('match', '^LISTEN\s+\d+\s+\d+\s+127\.0\.0\.1:8080\s+.*users:\(\("nginx",') |
+    list | length != 1
+  become: true
+
+- name: Confirm exact requested HTTPS socket owned by nginx
+  ansible.builtin.command:
+    argv: [ss, -H, -lntp]
+  register: _zabbix_integration_https_listener
+  changed_when: false
+  failed_when: >-
+    _zabbix_integration_https_listener.rc != 0 or
+    _zabbix_integration_https_listener.stdout_lines |
+    select('match', '^LISTEN\s+\d+\s+\d+\s+' ~
+    (zabbix_integration_publish_listen_ipv4 | regex_escape) ~
+    ':443\s+.*users:\(\("nginx",') | list | length != 1
+  become: true
+  when: zabbix_integration_publish | bool
+
+- name: Confirm HTTPS is not listening when publication is disabled
+  ansible.builtin.command:
+    argv: [ss, -H, -lntp]
+  register: _zabbix_integration_closed_https_listener
+  changed_when: false
+  failed_when: >-
+    _zabbix_integration_closed_https_listener.rc != 0 or
+    _zabbix_integration_closed_https_listener.stdout_lines |
+    select('search', ':443\s') | list | length != 0
+  become: true
+  when: not (zabbix_integration_publish | bool)
+
+- name: Decode served HTTPS certificate fingerprint
+  ansible.builtin.set_fact:
+    _zabbix_integration_validated_served_fingerprint: >-
+      {{ (_zabbix_integration_served_certificate_validation.stdout |
+      from_json).served_fingerprint }}
+  no_log: true
+  when: zabbix_integration_publish | bool
+
+- name: Create frontend lifecycle state directory
+  ansible.builtin.file:
+    path: /var/lib/zabbix-integration
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  become: true
+
+- name: Record successfully validated exact HTTPS lifecycle
+  ansible.builtin.copy:
+    content: "https-published-v2|{{ zabbix_integration_publish | bool | lower }}|{{ zabbix_integration_publish_listen_ipv4 }}|{{ zabbix_integration_publish_server_name }}|{{ zabbix_integration_publish_certificate_path }}|{{ zabbix_integration_publish_private_key_path }}|{{ _zabbix_integration_validated_served_fingerprint | default('disabled') }}\n"
+    dest: /var/lib/zabbix-integration/frontend-secured
+    owner: root
+    group: root
+    mode: "0600"
+  become: true
+  no_log: true

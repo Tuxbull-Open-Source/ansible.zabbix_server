@@ -1,0 +1,24 @@
+---
+collections:
+  - name: community.zabbix
+    version: 4.3.0
+  - name: fedora.linux_system_roles
+    version: 2.5.0
+  - name: ansible.windows
+    version: 3.3.0
+  - name: ansible.netcommon
+    version: 8.4.0
+  - name: ansible.utils
+    version: 6.0.1
+  - name: ansible.posix
+    version: 2.1.0
+  - name: community.general
+    version: 12.4.0
+  - name: community.mysql
+    version: 4.1.0
+  - name: community.postgresql
+    version: 4.2.0
+  - name: community.windows
+    version: 3.1.0
+  - name: containers.podman
+    version: 1.19.0

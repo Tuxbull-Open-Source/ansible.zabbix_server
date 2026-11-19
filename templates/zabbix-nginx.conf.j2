@@ -1,0 +1,37 @@
+# Local HTTP remains available for role-owned bootstrap automation.
+server {
+    listen 127.0.0.1:8080;
+    server_name localhost;
+    server_tokens off;
+    root /usr/share/zabbix/ui;
+    index index.php;
+    client_max_body_size 5m;
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+    location /assets {
+        access_log off;
+        expires 10d;
+    }
+    location ~ /\.ht {
+        deny all;
+    }
+    location ~ /(api/|conf[^\.]|include|locale|vendor) {
+        deny all;
+        return 404;
+    }
+    location ~ [^/]\.php(/|$) {
+        fastcgi_pass unix:/run/php-fpm/zabbix.sock;
+        fastcgi_split_path_info ^(.+\.php)(/.+)$;
+        fastcgi_index index.php;
+        include fastcgi_params;
+        fastcgi_param DOCUMENT_ROOT /usr/share/zabbix/ui;
+        fastcgi_param SCRIPT_FILENAME /usr/share/zabbix/ui$fastcgi_script_name;
+        fastcgi_param PATH_TRANSLATED /usr/share/zabbix/ui$fastcgi_script_name;
+        fastcgi_intercept_errors on;
+        fastcgi_connect_timeout 60;
+        fastcgi_send_timeout 180;
+        fastcgi_read_timeout 180;
+    }
+}

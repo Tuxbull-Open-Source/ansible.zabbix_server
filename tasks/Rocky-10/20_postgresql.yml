@@ -1,0 +1,31 @@
+---
+- name: Provision PostgreSQL engine and local authentication
+  ansible.builtin.include_role:
+    name: fedora.linux_system_roles.postgresql
+  vars:
+    postgresql_version: "{{ zabbix_integration_postgresql_version }}"
+    postgresql_password: null
+    postgresql_server_tuning: false
+    postgresql_ssl_enable: false
+    postgresql_certificates: []
+    postgresql_server_conf:
+      listen_addresses: "'localhost'"
+      password_encryption: "'scram-sha-256'"
+    postgresql_pg_hba_conf:
+      - type: local
+        database: all
+        user: all
+        auth_method: peer
+      - type: host
+        database: all
+        user: all
+        address: 127.0.0.1/32
+        auth_method: scram-sha-256
+      - type: host
+        database: all
+        user: all
+        address: ::1/128
+        auth_method: scram-sha-256
+
+- name: Apply PostgreSQL role handlers before readiness checks
+  ansible.builtin.meta: flush_handlers

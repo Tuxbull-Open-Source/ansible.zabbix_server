@@ -1,0 +1,85 @@
+---
+- name: Clear the deliberately suppressed upstream server handler
+  ansible.builtin.meta: flush_handlers
+
+- name: Keep Zabbix server stopped until an incomplete schema is repaired
+  ansible.builtin.systemd_service:
+    name: zabbix-server
+    state: stopped
+  when: not _zabbix_integration_schema_was_ready | bool
+  become: true
+
+- name: Read post-composition Zabbix server configuration state
+  ansible.builtin.stat:
+    path: "{{ zabbix_integration_server_config_path }}"
+    checksum_algorithm: sha256
+  register: _zabbix_integration_server_config_after
+  become: true
+
+- name: Detect the packaged Zabbix schema without an expected SQL failure
+  community.postgresql.postgresql_query:
+    login_user: "{{ zabbix_integration_database_user }}"
+    login_password: "{{ zabbix_integration_database_password }}"
+    login_host: localhost
+    login_port: 5432
+    login_db: "{{ zabbix_integration_database_name }}"
+    query: "SELECT to_regclass('public.dbversion')::text AS dbversion"
+  register: _zabbix_integration_schema_state
+  no_log: true
+  diff: false
+
+- name: Import the pinned packaged PostgreSQL schema only when absent
+  community.postgresql.postgresql_db:
+    name: "{{ zabbix_integration_database_name }}"
+    login_user: "{{ zabbix_integration_database_user }}"
+    login_password: "{{ zabbix_integration_database_password }}"
+    login_host: localhost
+    login_port: 5432
+    state: restore
+    target: /usr/share/zabbix/sql-scripts/postgresql/server.sql.gz
+  when: "_zabbix_integration_schema_state.query_result == [{'dbversion': none}]"
+  no_log: true
+  diff: false
+
+- name: Verify the Zabbix schema version table after optional import
+  community.postgresql.postgresql_query:
+    login_user: "{{ zabbix_integration_database_user }}"
+    login_password: "{{ zabbix_integration_database_password }}"
+    login_host: localhost
+    login_port: 5432
+    login_db: "{{ zabbix_integration_database_name }}"
+    query: SELECT mandatory FROM dbversion
+  register: _zabbix_integration_schema_version
+  failed_when: >-
+    _zabbix_integration_schema_version.rowcount != 1 or
+    _zabbix_integration_schema_version.query_result | length != 1 or
+    _zabbix_integration_schema_version.query_result[0].mandatory is not integer
+  no_log: true
+  diff: false
+
+- name: Unmask Zabbix server only after schema verification
+  ansible.builtin.systemd_service:
+    name: zabbix-server
+    masked: false
+  when: not _zabbix_integration_schema_was_ready | bool
+  become: true
+
+- name: Restart an already active Zabbix server only for configuration drift
+  ansible.builtin.systemd_service:
+    name: zabbix-server
+    enabled: true
+    state: restarted
+  when:
+    - _zabbix_integration_schema_was_ready | bool
+    - _zabbix_integration_server_active_before.rc == 0
+    - >-
+      _zabbix_integration_server_config_before.stat.checksum | default('') !=
+      _zabbix_integration_server_config_after.stat.checksum | default('')
+  become: true
+
+- name: Enable and start Zabbix server after schema verification
+  ansible.builtin.systemd_service:
+    name: zabbix-server
+    enabled: true
+    state: started
+  become: true

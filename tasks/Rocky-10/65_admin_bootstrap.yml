@@ -1,0 +1,298 @@
+---
+- name: Secure the built-in Admin credential through the loopback API
+  when: zabbix_integration_admin_bootstrap | bool
+  no_log: true
+  diff: false
+  block:
+  # Every task in this stage is deliberately no_log/diff-disabled: registered URI
+  # results contain request bodies, passwords, session tokens, or nested API errors.
+  - name: Try the desired Admin credential against the loopback API
+    ansible.builtin.uri:
+      url: http://127.0.0.1:8080/api_jsonrpc.php
+      method: POST
+      headers:
+        Content-Type: application/json-rpc
+      body_format: json
+      body:
+        jsonrpc: "2.0"
+        method: user.login
+        params:
+          username: Admin
+          password: "{{ zabbix_integration_admin_password }}"
+          userData: true
+        id: 6501
+      return_content: true
+      status_code: 200
+      use_proxy: false
+    register: _zabbix_integration_desired_login
+    failed_when: false
+    changed_when: false
+    no_log: true
+    diff: false
+
+  - name: Validate the desired-login JSON-RPC envelope
+    ansible.builtin.assert:
+      that:
+        - _zabbix_integration_desired_login.status | default(0) == 200
+        - _zabbix_integration_desired_login.json is mapping
+        - _zabbix_integration_desired_login.json.jsonrpc | default('') == '2.0'
+        - _zabbix_integration_desired_login.json.id | default(-1) == 6501
+        - >-
+          (_zabbix_integration_desired_login.json.get('result', {}) is mapping and
+          _zabbix_integration_desired_login.json.get('result', {}).get('sessionid', '') is string and
+          _zabbix_integration_desired_login.json.get('result', {}).get('sessionid', '') | length > 0 and
+          _zabbix_integration_desired_login.json.get('result', {}).get('userid', '') is match('^[0-9]+$') and
+          _zabbix_integration_desired_login.json.get('result', {}).get('username', '') == 'Admin' and
+          _zabbix_integration_desired_login.json.error is not defined) or
+          (_zabbix_integration_desired_login.json.error is mapping and
+          _zabbix_integration_desired_login.json.result is not defined)
+      fail_msg: The loopback Zabbix API returned an invalid desired-login response.
+    no_log: true
+    diff: false
+
+  - name: Record whether the desired Admin credential is already valid
+    ansible.builtin.set_fact:
+      _zabbix_integration_desired_login_valid: >-
+        {{ _zabbix_integration_desired_login.json.result is defined }}
+    no_log: true
+    diff: false
+
+  - name: Verify the desired session can authenticate an API request
+    ansible.builtin.uri:
+      url: http://127.0.0.1:8080/api_jsonrpc.php
+      method: POST
+      headers:
+        Content-Type: application/json-rpc
+        Authorization: "Bearer {{ _zabbix_integration_desired_login.json.result.sessionid }}"
+      body_format: json
+      body:
+        jsonrpc: "2.0"
+        method: user.get
+        params:
+          output: [userid, username]
+          filter:
+            username: Admin
+        id: 6502
+      return_content: true
+      status_code: 200
+      use_proxy: false
+    register: _zabbix_integration_desired_auth_check
+    changed_when: false
+    when: _zabbix_integration_desired_login_valid | bool
+    no_log: true
+    diff: false
+
+  - name: Accept the already-configured credential only after API authentication
+    ansible.builtin.assert:
+      that:
+        - _zabbix_integration_desired_auth_check.status == 200
+        - _zabbix_integration_desired_auth_check.json is mapping
+        - _zabbix_integration_desired_auth_check.json.jsonrpc | default('') == '2.0'
+        - _zabbix_integration_desired_auth_check.json.id | default(-1) == 6502
+        - _zabbix_integration_desired_auth_check.json.error is not defined
+        - _zabbix_integration_desired_auth_check.json.result is sequence
+        - _zabbix_integration_desired_auth_check.json.result | length == 1
+        - _zabbix_integration_desired_auth_check.json.result[0].username | default('') == 'Admin'
+        - >-
+          _zabbix_integration_desired_auth_check.json.result[0].userid | default('') ==
+          _zabbix_integration_desired_login.json.result.userid
+      fail_msg: The desired credential logged in but could not verify Admin API authentication.
+    when: _zabbix_integration_desired_login_valid | bool
+    no_log: true
+    diff: false
+
+  - name: Bootstrap Admin only from the vendor credential
+    when: not _zabbix_integration_desired_login_valid | bool
+    no_log: true
+    diff: false
+    block:
+      - name: Log in once with the vendor-default Admin credential
+        ansible.builtin.uri:
+          url: http://127.0.0.1:8080/api_jsonrpc.php
+          method: POST
+          headers:
+            Content-Type: application/json-rpc
+          body_format: json
+          body:
+            jsonrpc: "2.0"
+            method: user.login
+            params:
+              username: Admin
+              password: zabbix
+              userData: true
+            id: 6510
+          return_content: true
+          status_code: 200
+          use_proxy: false
+        register: _zabbix_integration_default_login
+        failed_when: false
+        changed_when: false
+        no_log: true
+        diff: false
+
+      - name: Fail closed unless the vendor-default login returned exact Admin user data
+        ansible.builtin.assert:
+          that:
+            - _zabbix_integration_default_login.status | default(0) == 200
+            - _zabbix_integration_default_login.json is mapping
+            - _zabbix_integration_default_login.json.jsonrpc | default('') == '2.0'
+            - _zabbix_integration_default_login.json.id | default(-1) == 6510
+            - _zabbix_integration_default_login.json.error is not defined
+            - _zabbix_integration_default_login.json.result is mapping
+            - _zabbix_integration_default_login.json.result.sessionid | default('') is string
+            - _zabbix_integration_default_login.json.result.sessionid | default('') | length > 0
+            - _zabbix_integration_default_login.json.result.userid | default('') is match('^[0-9]+$')
+            - _zabbix_integration_default_login.json.result.username | default('') == 'Admin'
+          fail_msg: >-
+            Neither the desired nor vendor-default Admin credential authenticated as Admin;
+            refusing bootstrap without modifying the database.
+        no_log: true
+        diff: false
+
+      - name: Rotate only the login-returned Admin password
+        ansible.builtin.uri:
+          url: http://127.0.0.1:8080/api_jsonrpc.php
+          method: POST
+          headers:
+            Content-Type: application/json-rpc
+            Authorization: "Bearer {{ _zabbix_integration_default_login.json.result.sessionid }}"
+          body_format: json
+          body:
+            jsonrpc: "2.0"
+            method: user.update
+            params:
+              userid: "{{ _zabbix_integration_default_login.json.result.userid }}"
+              current_passwd: zabbix
+              passwd: "{{ zabbix_integration_admin_password }}"
+            id: 6511
+          return_content: true
+          status_code: 200
+          use_proxy: false
+        register: _zabbix_integration_admin_update
+        changed_when: true
+        no_log: true
+        diff: false
+
+      - name: Require an exact successful password-update response
+        ansible.builtin.assert:
+          that:
+            - _zabbix_integration_admin_update.status == 200
+            - _zabbix_integration_admin_update.json is mapping
+            - _zabbix_integration_admin_update.json.jsonrpc | default('') == '2.0'
+            - _zabbix_integration_admin_update.json.id | default(-1) == 6511
+            - _zabbix_integration_admin_update.json.error is not defined
+            - _zabbix_integration_admin_update.json.result is mapping
+            - _zabbix_integration_admin_update.json.result.userids is sequence
+            - _zabbix_integration_admin_update.json.result.userids | length == 1
+            - >-
+              _zabbix_integration_admin_update.json.result.userids[0] ==
+              _zabbix_integration_default_login.json.result.userid
+          fail_msg: Zabbix rejected or ambiguously reported the Admin password update.
+        no_log: true
+        diff: false
+
+      - name: Log in with the rotated Admin credential
+        ansible.builtin.uri:
+          url: http://127.0.0.1:8080/api_jsonrpc.php
+          method: POST
+          headers:
+            Content-Type: application/json-rpc
+          body_format: json
+          body:
+            jsonrpc: "2.0"
+            method: user.login
+            params:
+              username: Admin
+              password: "{{ zabbix_integration_admin_password }}"
+              userData: true
+            id: 6512
+          return_content: true
+          status_code: 200
+          use_proxy: false
+        register: _zabbix_integration_rotated_login
+        changed_when: false
+        no_log: true
+        diff: false
+
+      - name: Require the rotated credential to return the same Admin identity
+        ansible.builtin.assert:
+          that:
+            - _zabbix_integration_rotated_login.status == 200
+            - _zabbix_integration_rotated_login.json is mapping
+            - _zabbix_integration_rotated_login.json.jsonrpc | default('') == '2.0'
+            - _zabbix_integration_rotated_login.json.id | default(-1) == 6512
+            - _zabbix_integration_rotated_login.json.error is not defined
+            - _zabbix_integration_rotated_login.json.result is mapping
+            - _zabbix_integration_rotated_login.json.result.sessionid | default('') is string
+            - _zabbix_integration_rotated_login.json.result.sessionid | default('') | length > 0
+            - >-
+              _zabbix_integration_rotated_login.json.result.userid | default('') ==
+              _zabbix_integration_default_login.json.result.userid
+            - _zabbix_integration_rotated_login.json.result.username | default('') == 'Admin'
+          fail_msg: The updated Admin credential did not authenticate as the same Admin identity.
+        no_log: true
+        diff: false
+
+      - name: Verify the rotated session can authenticate an API request
+        ansible.builtin.uri:
+          url: http://127.0.0.1:8080/api_jsonrpc.php
+          method: POST
+          headers:
+            Content-Type: application/json-rpc
+            Authorization: "Bearer {{ _zabbix_integration_rotated_login.json.result.sessionid }}"
+          body_format: json
+          body:
+            jsonrpc: "2.0"
+            method: user.get
+            params:
+              output: [userid, username]
+              filter:
+                username: Admin
+            id: 6513
+          return_content: true
+          status_code: 200
+          use_proxy: false
+        register: _zabbix_integration_rotated_auth_check
+        changed_when: false
+        no_log: true
+        diff: false
+
+      - name: Require verified API identity after rotation
+        ansible.builtin.assert:
+          that:
+            - _zabbix_integration_rotated_auth_check.status == 200
+            - _zabbix_integration_rotated_auth_check.json is mapping
+            - _zabbix_integration_rotated_auth_check.json.jsonrpc | default('') == '2.0'
+            - _zabbix_integration_rotated_auth_check.json.id | default(-1) == 6513
+            - _zabbix_integration_rotated_auth_check.json.error is not defined
+            - _zabbix_integration_rotated_auth_check.json.result is sequence
+            - _zabbix_integration_rotated_auth_check.json.result | length == 1
+            - _zabbix_integration_rotated_auth_check.json.result[0].username | default('') == 'Admin'
+            - >-
+              _zabbix_integration_rotated_auth_check.json.result[0].userid | default('') ==
+              _zabbix_integration_rotated_login.json.result.userid
+          fail_msg: The rotated session did not verify as the login-returned Admin identity.
+        no_log: true
+        diff: false
+
+  - name: Create protected Admin-bootstrap state directory
+    ansible.builtin.file:
+      path: /var/lib/zabbix-integration
+      state: directory
+      owner: root
+      group: root
+      mode: "0700"
+    become: true
+    no_log: true
+    diff: false
+
+  - name: Record verified Admin API bootstrap
+    ansible.builtin.copy:
+      content: "admin-api-bootstrap-v1\n"
+      dest: /var/lib/zabbix-integration/admin-api-bootstrap
+      owner: root
+      group: root
+      mode: "0600"
+    become: true
+    no_log: true
+    diff: false

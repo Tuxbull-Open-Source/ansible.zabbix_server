@@ -1,0 +1,82 @@
+---
+# community.zabbix 4.3.0 asks for the nonexistent selinux-policy-epel on EL10.
+# Stage 40 already owns the required policy; hide only the broken agent include.
+- name: Verify SELinux remains enforcing before the scoped agent workaround
+  ansible.builtin.command: getenforce
+  register: _zabbix_integration_getenforce_before_agent
+  changed_when: false
+  failed_when: _zabbix_integration_getenforce_before_agent.stdout != 'Enforcing'
+
+- name: Run agent role with only its broken EL10 SELinux include bypassed
+  block:
+    - name: Save the real SELinux fact for the agent role
+      ansible.builtin.set_fact:
+        _zabbix_integration_original_agent_selinux_fact: "{{ ansible_facts.selinux | combine({}) }}"
+
+    - name: Temporarily hide SELinux from the agent role
+      ansible.builtin.set_fact:
+        ansible_facts: >-
+          {{ ansible_facts | combine({'selinux': ansible_facts.selinux |
+          combine({'status': 'disabled'})}, recursive=True) }}
+
+    - name: Configure Zabbix Agent 2 without API mutations
+      ansible.builtin.include_role:
+        name: community.zabbix.zabbix_agent
+      vars:
+        zabbix_agent_version: "{{ zabbix_integration_zabbix_version }}"
+        zabbix_agent_version_minor: "{{ zabbix_integration_agent_release }}"
+        zabbix_agent2: true
+        zabbix_agent_server: "{{ zabbix_integration_agent_server }}"
+        zabbix_agent_serveractive: "{{ zabbix_integration_agent_server }}"
+        zabbix_agent_listenip: 127.0.0.1
+        # The upstream Agent 2 default enables a wildcard status endpoint on
+        # TCP/9999. This local server does not need that endpoint.
+        zabbix_agent_statusport: null
+        zabbix_agent_tlsaccept: unencrypted
+        zabbix_agent_tlsconnect: unencrypted
+        zabbix_api_create_hostgroup: false
+        zabbix_api_create_hosts: false
+        zabbix_api_login_user: disabled
+        zabbix_api_login_pass: disabled
+        zabbix_api_validate_certs: true
+  always:
+    - name: Restore the real SELinux fact after the agent role
+      ansible.builtin.set_fact:
+        ansible_facts: >-
+          {{ ansible_facts | combine({'selinux':
+          _zabbix_integration_original_agent_selinux_fact}, recursive=False) }}
+      when: _zabbix_integration_original_agent_selinux_fact is defined
+
+- name: Verify the agent SELinux fact was restored
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.selinux == _zabbix_integration_original_agent_selinux_fact
+      - ansible_facts.selinux.status == 'enabled'
+
+- name: Verify SELinux remains enforcing after agent configuration
+  ansible.builtin.command: getenforce
+  register: _zabbix_integration_getenforce_after_agent
+  changed_when: false
+  failed_when: _zabbix_integration_getenforce_after_agent.stdout != 'Enforcing'
+
+- name: Inspect Agent 2 listeners after configuration
+  ansible.builtin.command:
+    argv:
+      - ss
+      - -H
+      - -lntp
+  register: _zabbix_integration_agent_listeners
+  changed_when: false
+
+- name: Require only the loopback Agent 2 listener
+  ansible.builtin.assert:
+    that:
+      - >-
+        _zabbix_integration_agent_listeners.stdout_lines |
+        select('search', '"zabbix_agent2"') |
+        select('match', '^LISTEN\s+\d+\s+\d+\s+127\.0\.0\.1:10050\s+\S+\s+users:') |
+        list | length == 1
+      - >-
+        _zabbix_integration_agent_listeners.stdout_lines |
+        select('search', '"zabbix_agent2"') | list | length == 1
+    fail_msg: Zabbix Agent 2 has an unexpected non-loopback or auxiliary listener.

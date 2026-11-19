@@ -1,0 +1,170 @@
+---
+# community.zabbix 4.3.0 asks for the nonexistent selinux-policy-epel on EL10.
+# Own its intended policy/boolean work here, then hide only that broken include.
+- name: Configure the pinned official Zabbix 8.0 repositories
+  ansible.builtin.include_role:
+    name: community.zabbix.zabbix_repo
+  vars:
+    zabbix_repo_version: "{{ zabbix_integration_zabbix_version }}"
+
+- name: Read the official Zabbix repository configuration
+  ansible.builtin.slurp:
+    src: /etc/yum.repos.d/zabbix.repo
+  register: _zabbix_integration_zabbix_repo
+  become: true
+
+- name: Require exact official repository identity and package signature policy
+  ansible.builtin.assert:
+    that:
+      - (_zabbix_integration_zabbix_repo.content | b64decode) is search('(?m)^\\[zabbix\\]$')
+      - (_zabbix_integration_zabbix_repo.content | b64decode) is search('(?m)^baseurl = https://repo\.zabbix\.com/zabbix/8\.0/stable/rhel/10/\$basearch/$')
+      - (_zabbix_integration_zabbix_repo.content | b64decode) is search('(?m)^gpgcheck = 1$')
+      - (_zabbix_integration_zabbix_repo.content | b64decode) is search('(?m)^gpgkey = file:///etc/pki/rpm-gpg/RPM-GPG-KEY-ZABBIX-B5333005$')
+
+- name: Resolve the exact EL10 policy provider from CRB only
+  ansible.builtin.command:
+    argv:
+      - dnf
+      - -q
+      - --disablerepo=*
+      - --enablerepo=crb
+      - repoquery
+      - --available
+      - --qf
+      - "%{name}-%{evr}|%{repoid}"
+      - "selinux-policy-targeted-extra-{{ zabbix_integration_selinux_policy_targeted_extra_evr }}"
+  register: _zabbix_integration_targeted_extra_repoquery
+  changed_when: false
+  failed_when: >-
+    _zabbix_integration_targeted_extra_repoquery.rc != 0 or
+    _zabbix_integration_targeted_extra_repoquery.stdout_lines !=
+    ['selinux-policy-targeted-extra-' ~ zabbix_integration_selinux_policy_targeted_extra_evr ~ '|crb']
+  become: true
+
+- name: Resolve the exact Zabbix policy from the official repository only
+  ansible.builtin.command:
+    argv:
+      - dnf
+      - -q
+      - --disablerepo=*
+      - --enablerepo=zabbix
+      - repoquery
+      - --available
+      - --qf
+      - "%{name}-%{evr}|%{repoid}"
+      - "zabbix-selinux-policy-{{ zabbix_integration_zabbix_selinux_policy_evr }}"
+  register: _zabbix_integration_zabbix_policy_repoquery
+  changed_when: false
+  failed_when: >-
+    _zabbix_integration_zabbix_policy_repoquery.rc != 0 or
+    _zabbix_integration_zabbix_policy_repoquery.stdout_lines !=
+    ['zabbix-selinux-policy-' ~ zabbix_integration_zabbix_selinux_policy_evr ~ '|zabbix']
+  become: true
+
+- name: Install exact enforcing SELinux policy packages from approved repositories
+  ansible.builtin.dnf:
+    name:
+      - "selinux-policy-targeted-extra-{{ zabbix_integration_selinux_policy_targeted_extra_evr }}"
+      - "zabbix-selinux-policy-{{ zabbix_integration_zabbix_selinux_policy_evr }}"
+    state: present
+    disablerepo: "*"
+    enablerepo:
+      - baseos
+      - crb
+      - zabbix
+    disable_gpg_check: false
+  become: true
+
+- name: Verify installed policy EVRs and signing keys
+  ansible.builtin.command:
+    argv: [rpm, -q, --qf, "%{name}-%{evr}|%{RSAHEADER:pgpsig}\\n", "{{ item.name }}"]
+  loop:
+    - name: selinux-policy-targeted-extra
+      evr: "{{ zabbix_integration_selinux_policy_targeted_extra_evr }}"
+      key: 6fedfc85
+    - name: zabbix-selinux-policy
+      evr: "{{ zabbix_integration_zabbix_selinux_policy_evr }}"
+      key: b5333005
+  register: _zabbix_integration_policy_signatures
+  changed_when: false
+  failed_when: >-
+    _zabbix_integration_policy_signatures.rc != 0 or
+    not _zabbix_integration_policy_signatures.stdout.startswith(item.name ~ '-' ~ item.evr ~ '|') or
+    (_zabbix_integration_policy_signatures.stdout | lower |
+    regex_search('key id (?:[0-9a-f]{8})?' ~ item.key ~ '(?:\\s|$)')) is none
+  become: true
+
+- name: Own the persistent Zabbix network SELinux boolean
+  ansible.posix.seboolean:
+    name: zabbix_can_network
+    state: "{{ zabbix_integration_selinux_allow_zabbix_can_network }}"
+    persistent: true
+  become: true
+
+- name: Verify SELinux remains enforcing before the scoped upstream workaround
+  ansible.builtin.command: getenforce
+  register: _zabbix_integration_getenforce_before_server
+  changed_when: false
+  failed_when: _zabbix_integration_getenforce_before_server.stdout != 'Enforcing'
+
+- name: Establish fail-closed schema and service state before composition
+  ansible.builtin.include_tasks: zabbix_server/schema_service_pre.yml
+
+- name: Run server role with only its broken EL10 SELinux include bypassed
+  block:
+    - name: Save the real SELinux fact
+      ansible.builtin.set_fact:
+        _zabbix_integration_original_selinux_fact: "{{ ansible_facts.selinux | combine({}) }}"
+
+    - name: Temporarily hide SELinux from community.zabbix 4.3.0
+      ansible.builtin.set_fact:
+        ansible_facts: >-
+          {{ ansible_facts | combine({'selinux': ansible_facts.selinux |
+          combine({'status': 'disabled'})}, recursive=True) }}
+
+    - name: Configure Zabbix server and own database/schema lifecycle
+      ansible.builtin.include_role:
+        name: community.zabbix.zabbix_server
+        apply:
+          no_log: true
+          diff: false
+      vars:
+        zabbix_manage_repo: false
+        zabbix_server_version: "{{ zabbix_integration_zabbix_version }}"
+        zabbix_server_version_minor: "{{ zabbix_integration_server_release }}"
+        zabbix_server_database: pgsql
+        zabbix_server_dbhost: localhost
+        zabbix_server_dbname: "{{ zabbix_integration_database_name }}"
+        zabbix_server_dbuser: "{{ zabbix_integration_database_user }}"
+        zabbix_server_dbpassword: "{{ zabbix_integration_database_password }}"
+        zabbix_server_database_creation: true
+        # Avoid upstream's first-install failed query/rescue schema detector.
+        zabbix_server_database_sqlload: false
+        zabbix_server_database_timescaledb: false
+        zabbix_server_allowunsupporteddbversions: false
+        zabbix_server_dbpassword_hash_method: scram-sha-256
+        zabbix_server_listenip: 127.0.0.1
+        zabbix_server_manage_service: false
+        zabbix_server_conf_file: "{{ zabbix_integration_server_config_path }}"
+  always:
+    - name: Restore the real SELinux fact even after upstream failure
+      ansible.builtin.set_fact:
+        ansible_facts: >-
+          {{ ansible_facts | combine({'selinux':
+          _zabbix_integration_original_selinux_fact}, recursive=False) }}
+      when: _zabbix_integration_original_selinux_fact is defined
+
+- name: Verify schema and release the service after composition
+  ansible.builtin.include_tasks: zabbix_server/schema_service_post.yml
+
+- name: Verify the SELinux fact was restored
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.selinux == _zabbix_integration_original_selinux_fact
+      - ansible_facts.selinux.status == 'enabled'
+
+- name: Verify SELinux remains enforcing after server configuration
+  ansible.builtin.command: getenforce
+  register: _zabbix_integration_getenforce_after_server
+  changed_when: false
+  failed_when: _zabbix_integration_getenforce_after_server.stdout != 'Enforcing'

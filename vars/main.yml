@@ -1,0 +1,14 @@
+# vars/main.yml
+---
+_zabbix_integration_supported_distribution: Rocky
+_zabbix_integration_supported_major: "10"
+_zabbix_integration_prerequisite_packages:
+  - nginx
+  - php
+  - php-fpm
+  - python3-libsemanage
+  - python3-policycoreutils
+_zabbix_integration_web_packages:
+  - "zabbix-web-pgsql-{{ zabbix_integration_zabbix_version }}.{{ zabbix_integration_web_release }}"
+  - "zabbix-nginx-conf-{{ zabbix_integration_zabbix_version }}.{{ zabbix_integration_web_release }}"
+...

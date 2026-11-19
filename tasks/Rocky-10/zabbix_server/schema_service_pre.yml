@@ -1,0 +1,108 @@
+---
+- name: Inspect Zabbix database existence without a failing query
+  ansible.builtin.command:
+    argv:
+      - psql
+      - -X
+      - -A
+      - -t
+      - -v
+      - ON_ERROR_STOP=1
+      - -d
+      - postgres
+      - -c
+      - SELECT datname FROM pg_database
+  become: true
+  become_user: postgres
+  register: _zabbix_integration_database_probe
+  changed_when: false
+  failed_when: _zabbix_integration_database_probe.rc != 0
+
+- name: Derive exact database existence from returned names
+  ansible.builtin.set_fact:
+    _zabbix_integration_database_exists: >-
+      {{ zabbix_integration_database_name in
+      _zabbix_integration_database_probe.stdout_lines }}
+
+- name: Inspect existing Zabbix schema without a failing query
+  ansible.builtin.command:
+    argv: [psql, -X, -A, -t, -v, ON_ERROR_STOP=1, -d,
+      "{{ zabbix_integration_database_name }}", -c,
+      "SELECT to_regclass('public.dbversion')::text"]
+  become: true
+  become_user: postgres
+  register: _zabbix_integration_pre_schema_probe
+  changed_when: false
+  failed_when: >-
+    _zabbix_integration_pre_schema_probe.rc != 0 or
+    _zabbix_integration_pre_schema_probe.stdout not in ['', 'dbversion']
+  when: _zabbix_integration_database_exists | bool
+
+- name: Count schema-version rows only after the table is proven present
+  ansible.builtin.command:
+    argv: [psql, -X, -A, -t, -v, ON_ERROR_STOP=1, -d,
+      "{{ zabbix_integration_database_name }}", -c,
+      "SELECT count(*) FROM dbversion"]
+  become: true
+  become_user: postgres
+  register: _zabbix_integration_pre_schema_rows_probe
+  changed_when: false
+  failed_when: >-
+    _zabbix_integration_pre_schema_rows_probe.rc != 0 or
+    _zabbix_integration_pre_schema_rows_probe.stdout is not match('^[0-9]+$')
+  when: (_zabbix_integration_pre_schema_probe.stdout | default('')) == 'dbversion'
+
+- name: Read schema version only after exactly one row is proven present
+  ansible.builtin.command:
+    argv: [psql, -X, -A, -t, -v, ON_ERROR_STOP=1, -d,
+      "{{ zabbix_integration_database_name }}", -c,
+      "SELECT mandatory FROM dbversion"]
+  become: true
+  become_user: postgres
+  register: _zabbix_integration_pre_schema_version_probe
+  changed_when: false
+  failed_when: _zabbix_integration_pre_schema_version_probe.rc != 0
+  when: (_zabbix_integration_pre_schema_rows_probe.stdout | default('')) == '1'
+
+- name: Derive pre-composition schema readiness
+  ansible.builtin.set_fact:
+    _zabbix_integration_schema_was_ready: >-
+      {{ (_zabbix_integration_database_exists | bool) and
+      ((_zabbix_integration_pre_schema_probe.stdout | default('')) == 'dbversion') and
+      ((_zabbix_integration_pre_schema_rows_probe.stdout | default('')) == '1') and
+      ((_zabbix_integration_pre_schema_version_probe.stdout | default('')) is
+      match('^[0-9]+$')) }}
+
+- name: Read pre-composition Zabbix server service state
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - is-active
+      - zabbix-server
+  register: _zabbix_integration_server_active_before
+  changed_when: false
+  failed_when: _zabbix_integration_server_active_before.rc not in [0, 3, 4]
+  become: true
+
+- name: Read pre-composition Zabbix server configuration state
+  ansible.builtin.stat:
+    path: "{{ zabbix_integration_server_config_path }}"
+    checksum_algorithm: sha256
+  register: _zabbix_integration_server_config_before
+  become: true
+
+- name: Stop a running server before repairing an incomplete schema
+  ansible.builtin.systemd_service:
+    name: zabbix-server
+    state: stopped
+  when:
+    - not _zabbix_integration_schema_was_ready | bool
+    - _zabbix_integration_server_active_before.rc == 0
+  become: true
+
+- name: Mask Zabbix server during incomplete-schema composition
+  ansible.builtin.systemd_service:
+    name: zabbix-server
+    masked: true
+  when: not _zabbix_integration_schema_was_ready | bool
+  become: true

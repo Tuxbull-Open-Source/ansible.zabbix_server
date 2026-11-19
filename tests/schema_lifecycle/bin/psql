@@ -1,0 +1,28 @@
+#!/usr/bin/env python3
+import json
+import os
+import sys
+
+path = os.environ['LIFECYCLE_STATE']
+with open(path, encoding='utf-8') as stream:
+    state = json.load(stream)
+args = sys.argv[1:]
+query = args[args.index('-c') + 1]
+state['events'].append('psql:' + query)
+if 'pg_database' in query:
+    output = 'postgres\ntemplate0\ntemplate1'
+    if state['database_exists']:
+        output += '\nzabbix'
+elif 'to_regclass' in query:
+    output = 'dbversion' if state['schema_rows'] is not None else ''
+elif 'count(*)' in query:
+    output = str(state['schema_rows'])
+elif 'SELECT mandatory' in query:
+    value = state.get('mandatory', 8000000)
+    output = 't' if value is True else ('f' if value is False else str(value))
+else:
+    print('unexpected fake psql query', file=sys.stderr)
+    sys.exit(2)
+with open(path, 'w', encoding='utf-8') as stream:
+    json.dump(state, stream, sort_keys=True)
+print(output)

@@ -1,0 +1,292 @@
+---
+# This stage follows verified Admin API bootstrap. It owns no firewall state.
+- name: Inspect verified Admin bootstrap marker before publication
+  ansible.builtin.stat:
+    path: /var/lib/zabbix-integration/admin-api-bootstrap
+  register: _zabbix_integration_admin_bootstrap_marker
+  become: true
+  when: zabbix_integration_publish | bool
+
+- name: Read verified Admin bootstrap marker before publication
+  ansible.builtin.slurp:
+    src: /var/lib/zabbix-integration/admin-api-bootstrap
+  register: _zabbix_integration_admin_bootstrap_marker_content
+  become: true
+  when:
+    - zabbix_integration_publish | bool
+    - _zabbix_integration_admin_bootstrap_marker.stat.exists
+
+- name: Require verified Admin bootstrap state before publication
+  ansible.builtin.assert:
+    that:
+      - _zabbix_integration_admin_bootstrap_marker.stat.exists
+      - _zabbix_integration_admin_bootstrap_marker.stat.isreg
+      - _zabbix_integration_admin_bootstrap_marker.stat.pw_name == 'root'
+      - _zabbix_integration_admin_bootstrap_marker.stat.gr_name == 'root'
+      - _zabbix_integration_admin_bootstrap_marker.stat.mode == '0600'
+      - _zabbix_integration_admin_bootstrap_marker_content.content == 'YWRtaW4tYXBpLWJvb3RzdHJhcC12MQo='
+    fail_msg: Direct HTTPS publication requires verified stage-65 Admin API bootstrap.
+  when: zabbix_integration_publish | bool
+
+- name: Revalidate TLS publication directory chain immediately before creation
+  ansible.builtin.command:
+    argv:
+      - /usr/local/sbin/zabbix-https-validate
+      - --validate-directory-chain
+      - "{{ zabbix_integration_publish_tls_directory }}"
+  changed_when: false
+  become: true
+  when: zabbix_integration_publish | bool
+
+- name: Create protected TLS material directory
+  ansible.builtin.file:
+    path: "{{ zabbix_integration_publish_tls_directory }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  become: true
+  when: zabbix_integration_publish | bool
+
+- name: Validate created TLS publication directory chain before material mutation
+  ansible.builtin.command:
+    argv:
+      - /usr/local/sbin/zabbix-https-validate
+      - --validate-directory-chain
+      - "{{ zabbix_integration_publish_tls_directory }}"
+      - --require-final-directory
+  changed_when: false
+  become: true
+  when: zabbix_integration_publish | bool
+
+- name: Create protected HTTPS lifecycle state directory
+  ansible.builtin.file:
+    path: /var/lib/zabbix-integration
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  become: true
+
+- name: Recover or renew role-owned certificate material through validated staging
+  when:
+    - zabbix_integration_publish | bool
+    - not _zabbix_integration_frontend_secured
+  become: true
+  block:
+    - name: Create root-only certificate staging directory
+      ansible.builtin.tempfile:
+        state: directory
+        path: /var/lib/zabbix-integration
+        prefix: tls-stage-
+      register: _zabbix_integration_tls_stage
+
+    - name: Generate candidate key and self-signed certificate in staging
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -x509
+          - -newkey
+          - rsa:3072
+          - -sha256
+          - -nodes
+          - -days
+          - "{{ zabbix_integration_publish_certificate_days }}"
+          - -subj
+          - "/CN={{ zabbix_integration_publish_server_name }}"
+          - -addext
+          - "subjectAltName=DNS:{{ zabbix_integration_publish_server_name }},IP:{{ zabbix_integration_publish_listen_ipv4 }}"
+          - -keyout
+          - "{{ _zabbix_integration_tls_stage.path }}/server.key"
+          - -out
+          - "{{ _zabbix_integration_tls_stage.path }}/server.crt"
+      no_log: true
+
+    - name: Restrict candidate material before validation
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: root
+        group: root
+        mode: "0600"
+      loop:
+        - "{{ _zabbix_integration_tls_stage.path }}/server.key"
+        - "{{ _zabbix_integration_tls_stage.path }}/server.crt"
+
+    - name: Fully validate candidate certificate pair
+      ansible.builtin.command:
+        argv:
+          - /usr/local/sbin/zabbix-https-validate
+          - --cert
+          - "{{ _zabbix_integration_tls_stage.path }}/server.crt"
+          - --key
+          - "{{ _zabbix_integration_tls_stage.path }}/server.key"
+          - --dns
+          - "{{ zabbix_integration_publish_server_name }}"
+          - --ip
+          - "{{ zabbix_integration_publish_listen_ipv4 }}"
+          - --checkend
+          - "{{ zabbix_integration_publish_certificate_renewal_days * 86400 }}"
+      register: _zabbix_integration_candidate_validation
+      changed_when: false
+      no_log: true
+
+    - name: Decode validated candidate identity
+      ansible.builtin.set_fact:
+        _zabbix_integration_candidate_fingerprint: >-
+          {{ (_zabbix_integration_candidate_validation.stdout | from_json).fingerprint }}
+      no_log: true
+
+    - name: Mark candidate paths as role-owned before installation
+      ansible.builtin.copy:
+        content: "https-certificate-v2|{{ zabbix_integration_publish_server_name }}|{{ zabbix_integration_publish_listen_ipv4 }}|{{ zabbix_integration_publish_certificate_path }}|{{ zabbix_integration_publish_private_key_path }}|{{ _zabbix_integration_candidate_fingerprint }}\n"
+        dest: /var/lib/zabbix-integration/https-certificate
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Remove only marker-owned old or partial material before installation
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ zabbix_integration_publish_private_key_path }}"
+        - "{{ zabbix_integration_publish_certificate_path }}"
+      no_log: true
+
+    - name: Install validated private key with an atomic file replacement
+      ansible.builtin.copy:
+        src: "{{ _zabbix_integration_tls_stage.path }}/server.key"
+        dest: "{{ zabbix_integration_publish_private_key_path }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Install validated certificate with an atomic file replacement
+      ansible.builtin.copy:
+        src: "{{ _zabbix_integration_tls_stage.path }}/server.crt"
+        dest: "{{ zabbix_integration_publish_certificate_path }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0644"
+      no_log: true
+  always:
+    - name: Remove certificate staging directory and candidates
+      ansible.builtin.file:
+        path: "{{ _zabbix_integration_tls_stage.path | default('/var/lib/zabbix-integration/no-stage') }}"
+        state: absent
+      become: true
+      no_log: true
+
+- name: Validate installed role-owned certificate before vhost installation
+  ansible.builtin.command:
+    argv:
+      - /usr/local/sbin/zabbix-https-validate
+      - --cert
+      - "{{ zabbix_integration_publish_certificate_path }}"
+      - --key
+      - "{{ zabbix_integration_publish_private_key_path }}"
+      - --dns
+      - "{{ zabbix_integration_publish_server_name }}"
+      - --ip
+      - "{{ zabbix_integration_publish_listen_ipv4 }}"
+      - --checkend
+      - "{{ zabbix_integration_publish_certificate_renewal_days * 86400 }}"
+  register: _zabbix_integration_installed_certificate_validation
+  changed_when: false
+  become: true
+  no_log: true
+  when: zabbix_integration_publish | bool
+
+- name: Install exact direct HTTPS virtual host
+  ansible.builtin.template:
+    src: zabbix-https.conf.j2
+    dest: /etc/nginx/zabbix-tls-enabled/zabbix-https.conf
+    owner: root
+    group: root
+    mode: "0644"
+  register: _zabbix_integration_https_configuration
+  become: true
+  when: zabbix_integration_publish | bool
+
+- name: Remove direct HTTPS virtual host when publication is disabled
+  ansible.builtin.file:
+    path: /etc/nginx/zabbix-tls-enabled/zabbix-https.conf
+    state: absent
+  register: _zabbix_integration_https_configuration_removed
+  become: true
+  when: not (zabbix_integration_publish | bool)
+
+- name: Validate nginx after publication configuration
+  ansible.builtin.command: nginx -t
+  changed_when: false
+  become: true
+
+- name: Reload nginx only after publication validation
+  ansible.builtin.service:
+    name: nginx
+    state: reloaded
+  become: true
+  when: >-
+    (zabbix_integration_publish | bool and _zabbix_integration_https_configuration.changed) or
+    (not (zabbix_integration_publish | bool) and
+    _zabbix_integration_https_configuration_removed.changed)
+
+- name: Require nginx active after HTTPS publication reload
+  ansible.builtin.command: systemctl is-active nginx
+  register: _zabbix_integration_nginx_active_after_publication
+  changed_when: false
+  failed_when: >-
+    _zabbix_integration_nginx_active_after_publication.rc != 0 or
+    _zabbix_integration_nginx_active_after_publication.stdout != 'active'
+  become: true
+
+- name: Require exact HTTPS socket owned by nginx
+  ansible.builtin.command:
+    argv: [ss, -H, -lntp]
+  register: _zabbix_integration_https_process_listener
+  changed_when: false
+  failed_when: >-
+    _zabbix_integration_https_process_listener.rc != 0 or
+    _zabbix_integration_https_process_listener.stdout_lines |
+    select('match', '^LISTEN\s+\d+\s+\d+\s+' ~
+    (zabbix_integration_publish_listen_ipv4 | regex_escape) ~
+    ':443\s+.*users:\(\("nginx",') | list | length != 1
+  become: true
+  when: zabbix_integration_publish | bool
+
+- name: Validate served certificate and fingerprint after reload
+  ansible.builtin.command:
+    argv:
+      - /usr/local/sbin/zabbix-https-validate
+      - --cert
+      - "{{ zabbix_integration_publish_certificate_path }}"
+      - --key
+      - "{{ zabbix_integration_publish_private_key_path }}"
+      - --dns
+      - "{{ zabbix_integration_publish_server_name }}"
+      - --ip
+      - "{{ zabbix_integration_publish_listen_ipv4 }}"
+      - --checkend
+      - "{{ zabbix_integration_publish_certificate_renewal_days * 86400 }}"
+      - --served
+  register: _zabbix_integration_served_certificate_validation
+  changed_when: false
+  become: true
+  no_log: true
+  when: zabbix_integration_publish | bool
+
+- name: Perform direct local HTTPS GET without proxy trust
+  ansible.builtin.uri:
+    url: "https://{{ zabbix_integration_publish_listen_ipv4 }}/"
+    headers:
+      Host: "{{ zabbix_integration_publish_server_name }}"
+    validate_certs: false
+    use_proxy: false
+    return_content: false
+    status_code: [200, 302, 401, 403, 404]
+  when: zabbix_integration_publish | bool

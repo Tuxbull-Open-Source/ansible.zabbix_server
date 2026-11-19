@@ -1,0 +1,5 @@
+---
+# Replace both placeholders before encrypting this file as vault.yml.
+# Accepted values contain 20-128 characters from A-Z, a-z, 0-9, _ and -.
+vault_zabbix_database_password: CHANGE_ME
+vault_zabbix_admin_password: CHANGE_ME

@@ -1,0 +1,31 @@
+---
+- name: Execute production schema service lifecycle
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    zabbix_integration_database_name: zabbix
+    zabbix_integration_database_user: zabbix
+    zabbix_integration_database_password: SYNTHETIC_SCHEMA_SECRET_NEVER_PRINT
+    zabbix_integration_server_config_path: "{{ lookup('env', 'LIFECYCLE_CONFIG_PATH') }}"
+  tasks:
+    - name: Execute production pre-composition lifecycle
+      ansible.builtin.include_role:
+        name: tuxbull.zabbix_server
+        tasks_from: Rocky-10/zabbix_server/schema_service_pre.yml
+
+    - name: Execute package transaction stub
+      lifecycle_package_stub:
+        name: zabbix-server-pgsql
+        state: present
+
+    - name: Simulate upstream configuration drift
+      ansible.builtin.copy:
+        dest: "{{ zabbix_integration_server_config_path }}"
+        content: "{{ lookup('env', 'LIFECYCLE_CONFIG_CONTENT') }}"
+        mode: "0640"
+
+    - name: Execute production post-composition lifecycle
+      ansible.builtin.include_role:
+        name: tuxbull.zabbix_server
+        tasks_from: Rocky-10/zabbix_server/schema_service_post.yml

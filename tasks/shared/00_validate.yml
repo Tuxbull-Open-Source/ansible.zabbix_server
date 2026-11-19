@@ -1,0 +1,98 @@
+---
+- name: Validate supported platform, security posture, versions, and secrets
+  ansible.builtin.assert:
+    that:
+      - ansible_distribution == _zabbix_integration_supported_distribution
+      - ansible_distribution_major_version | string == _zabbix_integration_supported_major
+      - ansible_selinux.status | default('disabled') == 'enabled'
+      - ansible_selinux.mode | default('') | lower == zabbix_integration_expected_selinux_state | lower
+      - zabbix_integration_zabbix_version == '8.0'
+      - zabbix_integration_postgresql_version == '16'
+      - zabbix_integration_database_password is defined
+      - zabbix_integration_database_password is string
+      - zabbix_integration_database_password is match('^[A-Za-z0-9_-]{20,128}$')
+      - zabbix_integration_admin_password is defined
+      - zabbix_integration_admin_password is string
+      - zabbix_integration_admin_password is match('^[A-Za-z0-9_-]{20,128}$')
+      - zabbix_integration_database_name is match('^[a-z][a-z0-9_]{0,62}$')
+      - zabbix_integration_database_user is match('^[a-z][a-z0-9_]{0,62}$')
+      - zabbix_integration_server_name is match('^[A-Za-z0-9][A-Za-z0-9 _.-]{0,127}$')
+      - zabbix_integration_timezone is string
+      - zabbix_integration_timezone | length <= 128
+      - zabbix_integration_timezone is match('^(?:UTC|[A-Za-z]+[A-Za-z0-9._+-]*(?:/[A-Za-z0-9._+-]+)+)\\Z')
+      - zabbix_integration_agent_server == '127.0.0.1'
+      - zabbix_integration_epel_release_evr == '10-9.el10'
+      - zabbix_integration_fping_evr == '5.2-3.el10_0'
+      - zabbix_integration_selinux_policy_targeted_extra_evr == '42.1.27-2.el10_3.2'
+      - zabbix_integration_zabbix_selinux_policy_evr == '2:8.0.0-release1.el10'
+      - zabbix_integration_selinux_allow_zabbix_can_network is boolean
+      - zabbix_integration_server_release is defined
+      - zabbix_integration_server_release is string
+      - zabbix_integration_server_release is match('^[0-9]+-release[0-9]+\.el10$')
+      - zabbix_integration_web_release is defined
+      - zabbix_integration_web_release is string
+      - zabbix_integration_web_release is match('^[0-9]+-release[0-9]+\.el10$')
+      - zabbix_integration_agent_release is defined
+      - zabbix_integration_agent_release is string
+      - zabbix_integration_agent_release is match('^[0-9]+-release[0-9]+\.el10$')
+      - zabbix_integration_publish is boolean
+      - not (zabbix_integration_publish | bool) or (zabbix_integration_admin_bootstrap | bool)
+      - not (zabbix_integration_publish | bool) or
+        (zabbix_integration_publish_listen_ipv4 is match('^(?:(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\\.){3}(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\\Z'))
+      - not (zabbix_integration_publish | bool) or
+        (zabbix_integration_publish_listen_ipv4 != '0.0.0.0')
+      - not (zabbix_integration_publish | bool) or
+        (zabbix_integration_publish_server_name | length <= 253 and
+        zabbix_integration_publish_server_name is match('^(?=.{1,253}\\Z)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\Z'))
+      - not (zabbix_integration_publish | bool) or
+        (zabbix_integration_publish_tls_directory is match('^/etc/pki/tls(?:/[A-Za-z0-9._-]+)+\\Z'))
+      - not (zabbix_integration_publish | bool) or
+        (zabbix_integration_publish_tls_directory | normpath ==
+        zabbix_integration_publish_tls_directory)
+      - not (zabbix_integration_publish | bool) or
+        (zabbix_integration_publish_certificate_path is match('^/etc/pki/tls(?:/[A-Za-z0-9._-]+)+\\.(?:crt|pem)\\Z'))
+      - not (zabbix_integration_publish | bool) or
+        (zabbix_integration_publish_certificate_path | normpath ==
+        zabbix_integration_publish_certificate_path)
+      - not (zabbix_integration_publish | bool) or
+        (zabbix_integration_publish_private_key_path is match('^/etc/pki/tls(?:/[A-Za-z0-9._-]+)+\\.(?:key|pem)\\Z'))
+      - not (zabbix_integration_publish | bool) or
+        (zabbix_integration_publish_private_key_path | normpath ==
+        zabbix_integration_publish_private_key_path)
+      - not (zabbix_integration_publish | bool) or
+        (zabbix_integration_publish_certificate_path !=
+        zabbix_integration_publish_private_key_path)
+      - not (zabbix_integration_publish | bool) or
+        (zabbix_integration_publish_certificate_path | dirname == zabbix_integration_publish_tls_directory)
+      - not (zabbix_integration_publish | bool) or
+        (zabbix_integration_publish_private_key_path | dirname == zabbix_integration_publish_tls_directory)
+      - not (zabbix_integration_publish | bool) or
+        (zabbix_integration_publish_certificate_days is integer and
+        zabbix_integration_publish_certificate_days >= 30 and
+        zabbix_integration_publish_certificate_days <= 3970)
+      - not (zabbix_integration_publish | bool) or
+        (zabbix_integration_publish_certificate_renewal_days is integer and
+        zabbix_integration_publish_certificate_renewal_days >= 1 and
+        zabbix_integration_publish_certificate_renewal_days <
+        zabbix_integration_publish_certificate_days)
+      - zabbix_integration_admin_bootstrap is boolean
+    fail_msg: >-
+      Refusing deployment: this POC supports only SELinux-enforcing Rocky 10,
+      PostgreSQL 16, Zabbix 8.0, a safe timezone, loopback-only agent access,
+      explicit package and SELinux policy EVRs, mandatory secrets, and an explicit
+      Admin-bootstrap authorization. Publication additionally requires verified Admin
+      bootstrap, a strict IPv4 address and FQDN, safe TLS paths, and bounded validity.
+  no_log: true
+
+- name: Reject check mode before any deployment mutation
+  ansible.builtin.assert:
+    that:
+      - not ansible_check_mode
+    fail_msg: >-
+      This composition does not support reliable check mode. Run the role normally,
+      or set zabbix_integration_validation_only=true for controller-only validation.
+  when: not (zabbix_integration_validation_only | default(false) | bool)
+
+- name: Stop after controller-only validation when requested
+  ansible.builtin.meta: end_role
+  when: zabbix_integration_validation_only | default(false) | bool

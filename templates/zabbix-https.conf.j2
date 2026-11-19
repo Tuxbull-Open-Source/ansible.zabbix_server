@@ -1,0 +1,45 @@
+# Direct self-signed HTTPS publication owned by tuxbull.zabbix_server.
+server {
+    listen {{ zabbix_integration_publish_listen_ipv4 }}:443 ssl;
+    server_name {{ zabbix_integration_publish_server_name }};
+    server_tokens off;
+
+    ssl_certificate {{ zabbix_integration_publish_certificate_path }};
+    ssl_certificate_key {{ zabbix_integration_publish_private_key_path }};
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:ZabbixTLS:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    root /usr/share/zabbix/ui;
+    index index.php;
+    client_max_body_size 5m;
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+    location /assets {
+        access_log off;
+        expires 10d;
+    }
+    location ~ /\.ht {
+        deny all;
+    }
+    location ~ /(api/|conf[^\.]|include|locale|vendor) {
+        deny all;
+        return 404;
+    }
+    location ~ [^/]\.php(/|$) {
+        fastcgi_pass unix:/run/php-fpm/zabbix.sock;
+        fastcgi_split_path_info ^(.+\.php)(/.+)$;
+        fastcgi_index index.php;
+        include fastcgi_params;
+        fastcgi_param DOCUMENT_ROOT /usr/share/zabbix/ui;
+        fastcgi_param SCRIPT_FILENAME /usr/share/zabbix/ui$fastcgi_script_name;
+        fastcgi_param PATH_TRANSLATED /usr/share/zabbix/ui$fastcgi_script_name;
+        fastcgi_intercept_errors on;
+        fastcgi_connect_timeout 60;
+        fastcgi_send_timeout 180;
+        fastcgi_read_timeout 180;
+    }
+}

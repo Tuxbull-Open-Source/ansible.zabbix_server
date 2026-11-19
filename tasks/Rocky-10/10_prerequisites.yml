@@ -1,0 +1,377 @@
+---
+- name: Discover services before HTTPS and prerequisite preflight
+  ansible.builtin.service_facts:
+  become: true
+
+- name: Install role-owned HTTPS validation helper
+  ansible.builtin.copy:
+    src: zabbix_https_validate.py
+    dest: /usr/local/sbin/zabbix-https-validate
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+- name: Validate TLS publication directory chain before lifecycle changes
+  ansible.builtin.command:
+    argv:
+      - /usr/local/sbin/zabbix-https-validate
+      - --validate-directory-chain
+      - "{{ zabbix_integration_publish_tls_directory }}"
+  changed_when: false
+  become: true
+  when: zabbix_integration_publish | bool
+
+- name: Inspect HTTPS lifecycle and material paths
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: false
+  loop:
+    - /var/lib/zabbix-integration/frontend-secured
+    - /var/lib/zabbix-integration/https-certificate
+    - "{{ zabbix_integration_publish_certificate_path }}"
+    - "{{ zabbix_integration_publish_private_key_path }}"
+    - /etc/nginx/zabbix-tls-enabled/zabbix-https.conf
+  register: _zabbix_integration_https_path_stats
+  become: true
+
+- name: Read existing HTTPS lifecycle markers
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop:
+    - /var/lib/zabbix-integration/frontend-secured
+    - /var/lib/zabbix-integration/https-certificate
+  register: _zabbix_integration_https_markers
+  failed_when: false
+  become: true
+
+- name: Record inspected HTTPS state without exposing material
+  ansible.builtin.set_fact:
+    _zabbix_integration_frontend_marker_stat: "{{ _zabbix_integration_https_path_stats.results[0].stat }}"
+    _zabbix_integration_certificate_marker_stat: "{{ _zabbix_integration_https_path_stats.results[1].stat }}"
+    _zabbix_integration_certificate_stat: "{{ _zabbix_integration_https_path_stats.results[2].stat }}"
+    _zabbix_integration_private_key_stat: "{{ _zabbix_integration_https_path_stats.results[3].stat }}"
+    _zabbix_integration_https_vhost_stat: "{{ _zabbix_integration_https_path_stats.results[4].stat }}"
+    _zabbix_integration_frontend_marker_text: >-
+      {{ (_zabbix_integration_https_markers.results[0].content | default('') | b64decode)
+      if not (_zabbix_integration_https_markers.results[0].failed | default(true)) else '' }}
+    _zabbix_integration_certificate_marker_text: >-
+      {{ (_zabbix_integration_https_markers.results[1].content | default('') | b64decode)
+      if not (_zabbix_integration_https_markers.results[1].failed | default(true)) else '' }}
+
+- name: Derive role ownership and exact requested lifecycle markers
+  ansible.builtin.set_fact:
+    _zabbix_integration_certificate_owned: >-
+      {{ _zabbix_integration_certificate_marker_stat.exists | default(false) and
+      _zabbix_integration_certificate_marker_stat.isreg | default(false) and
+      _zabbix_integration_certificate_marker_stat.pw_name | default('') == 'root' and
+      _zabbix_integration_certificate_marker_stat.gr_name | default('') == 'root' and
+      _zabbix_integration_certificate_marker_stat.mode | default('') == '0600' and
+      _zabbix_integration_certificate_marker_text is
+      match('^https-certificate-v2\|[^|]+\|[^|]+\|' ~
+      (zabbix_integration_publish_certificate_path | regex_escape) ~ '\|' ~
+      (zabbix_integration_publish_private_key_path | regex_escape) ~ '\|[0-9a-f]{64}\n$') }}
+    _zabbix_integration_frontend_marker_matches_request: >-
+      {{ _zabbix_integration_frontend_marker_stat.exists | default(false) and
+      _zabbix_integration_frontend_marker_stat.isreg | default(false) and
+      _zabbix_integration_frontend_marker_stat.pw_name | default('') == 'root' and
+      _zabbix_integration_frontend_marker_stat.gr_name | default('') == 'root' and
+      _zabbix_integration_frontend_marker_stat.mode | default('') == '0600' and
+      _zabbix_integration_frontend_marker_text is
+      match('^https-published-v2\|' ~ (zabbix_integration_publish | bool | lower) ~ '\|' ~
+      (zabbix_integration_publish_listen_ipv4 | regex_escape) ~ '\|' ~
+      (zabbix_integration_publish_server_name | regex_escape) ~ '\|' ~
+      (zabbix_integration_publish_certificate_path | regex_escape) ~ '\|' ~
+      (zabbix_integration_publish_private_key_path | regex_escape) ~
+      '\|(?:[0-9a-f]{64}|disabled)\n$') }}
+
+- name: Discover assigned local IPv4 addresses
+  ansible.builtin.command:
+    argv: [ip, -4, -o, addr, show]
+  register: _zabbix_integration_local_ipv4
+  changed_when: false
+  when: zabbix_integration_publish | bool
+
+- name: Require requested HTTPS IPv4 to be locally assigned
+  ansible.builtin.assert:
+    that:
+      - >-
+        _zabbix_integration_local_ipv4.stdout is
+        search('(?m)^[0-9]+: [^ ]+ +inet ' ~
+        (zabbix_integration_publish_listen_ipv4 | regex_escape) ~ '/[0-9]+(?: |$)')
+    fail_msg: Refusing publication on an IPv4 address that is not assigned locally.
+  when: zabbix_integration_publish | bool
+
+- name: Validate marked local certificate state before package work
+  ansible.builtin.command:
+    argv:
+      - /usr/local/sbin/zabbix-https-validate
+      - --cert
+      - "{{ zabbix_integration_publish_certificate_path }}"
+      - --key
+      - "{{ zabbix_integration_publish_private_key_path }}"
+      - --dns
+      - "{{ zabbix_integration_publish_server_name }}"
+      - --ip
+      - "{{ zabbix_integration_publish_listen_ipv4 }}"
+      - --checkend
+      - "{{ zabbix_integration_publish_certificate_renewal_days * 86400 }}"
+      - --served
+  register: _zabbix_integration_prepackage_https_validation
+  changed_when: false
+  failed_when: false
+  become: true
+  no_log: true
+  when:
+    - zabbix_integration_publish | bool
+    - _zabbix_integration_frontend_marker_matches_request
+    - _zabbix_integration_certificate_owned
+
+- name: Validate marked nginx configuration before package work
+  ansible.builtin.command: nginx -t
+  register: _zabbix_integration_prepackage_nginx_validation
+  changed_when: false
+  failed_when: false
+  become: true
+  when: _zabbix_integration_frontend_marker_matches_request
+
+- name: Inspect marked nginx listeners and owning processes before package work
+  ansible.builtin.command:
+    argv: [ss, -H, -lntp]
+  register: _zabbix_integration_prepackage_listeners
+  changed_when: false
+  failed_when: false
+  become: true
+  when: _zabbix_integration_frontend_marker_matches_request
+
+- name: Derive exact validated published lifecycle state
+  ansible.builtin.set_fact:
+    _zabbix_integration_frontend_secured: >-
+      {{ _zabbix_integration_frontend_marker_matches_request and
+      (_zabbix_integration_prepackage_nginx_validation.rc | default(1) == 0) and
+      ((zabbix_integration_publish | bool and
+      _zabbix_integration_certificate_owned and
+      _zabbix_integration_certificate_stat.isreg | default(false) and
+      _zabbix_integration_certificate_stat.pw_name | default('') == 'root' and
+      _zabbix_integration_certificate_stat.gr_name | default('') == 'root' and
+      _zabbix_integration_certificate_stat.mode | default('') == '0644' and
+      _zabbix_integration_private_key_stat.isreg | default(false) and
+      _zabbix_integration_private_key_stat.pw_name | default('') == 'root' and
+      _zabbix_integration_private_key_stat.gr_name | default('') == 'root' and
+      _zabbix_integration_private_key_stat.mode | default('') == '0600' and
+      (_zabbix_integration_prepackage_https_validation.rc | default(1) == 0) and
+      (_zabbix_integration_certificate_marker_text | trim) ==
+      'https-certificate-v2|' ~ zabbix_integration_publish_server_name ~ '|' ~
+      zabbix_integration_publish_listen_ipv4 ~ '|' ~
+      zabbix_integration_publish_certificate_path ~ '|' ~
+      zabbix_integration_publish_private_key_path ~ '|' ~
+      (_zabbix_integration_prepackage_https_validation.stdout | from_json).fingerprint and
+      (_zabbix_integration_frontend_marker_text | trim) ==
+      'https-published-v2|true|' ~ zabbix_integration_publish_listen_ipv4 ~ '|' ~
+      zabbix_integration_publish_server_name ~ '|' ~
+      zabbix_integration_publish_certificate_path ~ '|' ~
+      zabbix_integration_publish_private_key_path ~ '|' ~
+      (_zabbix_integration_prepackage_https_validation.stdout | from_json).served_fingerprint and
+      _zabbix_integration_prepackage_listeners.stdout_lines | default([]) |
+      select('match', '^LISTEN\s+\d+\s+\d+\s+' ~
+      (zabbix_integration_publish_listen_ipv4 | regex_escape) ~ ':443\s+.*users:\(\("nginx",') |
+      list | length == 1) or
+      (not (zabbix_integration_publish | bool) and
+      _zabbix_integration_prepackage_listeners.stdout_lines | default([]) |
+      select('search', ':443\s') | list | length == 0)) and
+      _zabbix_integration_prepackage_listeners.stdout_lines | default([]) |
+      select('match', '^LISTEN\s+\d+\s+\d+\s+127\.0\.0\.1:8080\s+.*users:\(\("nginx",') |
+      list | length == 1 }}
+
+- name: Stop nginx when the published lifecycle is not exact
+  ansible.builtin.service:
+    name: nginx
+    state: stopped
+  become: true
+  when:
+    - not _zabbix_integration_frontend_secured
+    - "'nginx.service' in ansible_facts.services"
+
+- name: Verify nginx is inactive before removing stale publication
+  ansible.builtin.command: systemctl is-active nginx
+  register: _zabbix_integration_nginx_inactive_before_packages
+  changed_when: false
+  failed_when: >-
+    _zabbix_integration_nginx_inactive_before_packages.rc != 3 or
+    _zabbix_integration_nginx_inactive_before_packages.stdout != 'inactive'
+  become: true
+  when:
+    - not _zabbix_integration_frontend_secured
+    - "'nginx.service' in ansible_facts.services"
+
+- name: Remove stale direct HTTPS virtual host while nginx is stopped
+  ansible.builtin.file:
+    path: /etc/nginx/zabbix-tls-enabled/zabbix-https.conf
+    state: absent
+  become: true
+  when: not _zabbix_integration_frontend_secured
+
+- name: Refuse unknown preexisting HTTPS material after exposure is removed
+  ansible.builtin.assert:
+    that:
+      - not (_zabbix_integration_certificate_stat.exists | default(false)) or
+        (_zabbix_integration_certificate_stat.isreg | default(false))
+      - not (_zabbix_integration_private_key_stat.exists | default(false)) or
+        (_zabbix_integration_private_key_stat.isreg | default(false))
+      - not (_zabbix_integration_certificate_stat.exists | default(false) or
+        _zabbix_integration_private_key_stat.exists | default(false)) or
+        _zabbix_integration_certificate_owned
+    fail_msg: >-
+      Refusing to overwrite TLS material that is not a regular file or lacks the
+      protected role ownership marker; nginx is stopped and the direct HTTPS virtual
+      host has been removed.
+  when: not _zabbix_integration_frontend_secured
+
+- name: Mask nginx before any package transaction
+  ansible.builtin.command: systemctl mask nginx.service
+  register: _zabbix_integration_nginx_mask
+  changed_when: >-
+    'Created symlink' in (_zabbix_integration_nginx_mask.stdout ~
+    _zabbix_integration_nginx_mask.stderr)
+  become: true
+  when: not _zabbix_integration_frontend_secured
+
+- name: Install exact EPEL release package from Rocky Extras only
+  ansible.builtin.dnf:
+    name: "epel-release-{{ zabbix_integration_epel_release_evr }}"
+    state: present
+    disablerepo: "*"
+    enablerepo: extras
+  register: _zabbix_integration_epel_release_transaction
+  become: true
+
+- name: Refuse EPEL release drift on a verified frontend
+  ansible.builtin.assert:
+    that:
+      - not _zabbix_integration_epel_release_transaction.changed
+    fail_msg: >-
+      A verified frontend requires an explicit fail-closed upgrade workflow;
+      its EPEL release package transaction unexpectedly changed the host.
+  when: _zabbix_integration_frontend_secured
+
+- name: Verify installed EPEL release package signature
+  ansible.builtin.command:
+    argv: [rpm, -q, --qf, "%{RSAHEADER:pgpsig}", "epel-release-{{ zabbix_integration_epel_release_evr }}"]
+  register: _zabbix_integration_epel_release_signature
+  changed_when: false
+  failed_when: >-
+    _zabbix_integration_epel_release_signature.rc != 0 or
+    (_zabbix_integration_epel_release_signature.stdout | lower |
+    regex_search('key id (?:[0-9a-f]{8})?6fedfc85(?:\\s|$)')) is none
+  become: true
+
+- name: Read EPEL repository configuration
+  ansible.builtin.slurp:
+    src: /etc/yum.repos.d/epel.repo
+  register: _zabbix_integration_epel_repo
+  become: true
+
+- name: Require EPEL package signature verification
+  ansible.builtin.assert:
+    that:
+      - (_zabbix_integration_epel_repo.content | b64decode) is search('(?m)^\\[epel\\]$')
+      - (_zabbix_integration_epel_repo.content | b64decode) is search('(?m)^gpgcheck=1$')
+      - (_zabbix_integration_epel_repo.content | b64decode) is search('(?m)^gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-\\$releasever_major$')
+
+- name: Resolve the audited fping build from EPEL only
+  ansible.builtin.command:
+    argv:
+      - dnf
+      - -q
+      - --disablerepo=*
+      - --enablerepo=epel
+      - repoquery
+      - --available
+      - --qf
+      - "%{name}-%{evr}|%{repoid}"
+      - "fping-{{ zabbix_integration_fping_evr }}"
+  register: _zabbix_integration_fping_repoquery
+  changed_when: false
+  failed_when: >-
+    _zabbix_integration_fping_repoquery.rc != 0 or
+    _zabbix_integration_fping_repoquery.stdout_lines !=
+    ['fping-' ~ zabbix_integration_fping_evr ~ '|epel']
+  become: true
+
+- name: Install exact fping build from EPEL only
+  ansible.builtin.dnf:
+    name: "fping-{{ zabbix_integration_fping_evr }}"
+    state: present
+    disablerepo: "*"
+    enablerepo: epel
+  register: _zabbix_integration_fping_transaction
+  become: true
+
+- name: Refuse fping drift on a verified frontend
+  ansible.builtin.assert:
+    that:
+      - not _zabbix_integration_fping_transaction.changed
+    fail_msg: >-
+      A verified frontend requires an explicit fail-closed upgrade workflow;
+      its fping package transaction unexpectedly changed the host.
+  when: _zabbix_integration_frontend_secured
+
+- name: Verify installed fping package signature
+  ansible.builtin.command:
+    argv: [rpm, -q, --qf, "%{RSAHEADER:pgpsig}", "fping-{{ zabbix_integration_fping_evr }}"]
+  register: _zabbix_integration_fping_signature
+  changed_when: false
+  failed_when: >-
+    _zabbix_integration_fping_signature.rc != 0 or
+    (_zabbix_integration_fping_signature.stdout | lower |
+    regex_search('key id (?:[0-9a-f]{8})?e37ed158(?:\\s|$)')) is none
+  become: true
+
+- name: Install minimal web prerequisites
+  ansible.builtin.dnf:
+    name: "{{ _zabbix_integration_prerequisite_packages }}"
+    state: present
+  register: _zabbix_integration_prerequisite_transaction
+  become: true
+
+- name: Confirm verified frontend stayed loopback-only after prerequisite packages
+  ansible.builtin.command:
+    argv: [ss, -H, -lnt, "( sport = :8080 )"]
+  register: _zabbix_integration_frontend_listener_after_prerequisites
+  changed_when: false
+  failed_when: >-
+    _zabbix_integration_frontend_listener_after_prerequisites.rc != 0 or
+    _zabbix_integration_frontend_listener_after_prerequisites.stdout_lines | length != 1 or
+    not (_zabbix_integration_frontend_listener_after_prerequisites.stdout_lines[0] is
+    match('^LISTEN\s+\d+\s+\d+\s+127\.0\.0\.1:8080\s+'))
+  when: _zabbix_integration_frontend_secured
+
+- name: Refuse prerequisite package drift on a verified frontend
+  ansible.builtin.assert:
+    that:
+      - not _zabbix_integration_prerequisite_transaction.changed
+    fail_msg: >-
+      A verified frontend requires an explicit fail-closed upgrade workflow;
+      its prerequisite package transaction unexpectedly changed the host.
+  when: _zabbix_integration_frontend_secured
+
+- name: Refresh services after package installation
+  ansible.builtin.service_facts:
+  become: true
+
+- name: Stop packaged nginx before writing any configuration
+  ansible.builtin.service:
+    name: nginx
+    state: stopped
+  become: true
+  when: not _zabbix_integration_frontend_secured
+
+- name: Require packaged nginx to be inactive before configuration
+  ansible.builtin.command: systemctl is-active nginx
+  register: _zabbix_integration_nginx_inactive_before_configuration
+  changed_when: false
+  failed_when: >-
+    _zabbix_integration_nginx_inactive_before_configuration.rc != 3 or
+    _zabbix_integration_nginx_inactive_before_configuration.stdout != 'inactive'
+  become: true
+  when: not _zabbix_integration_frontend_secured

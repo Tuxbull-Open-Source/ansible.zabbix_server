@@ -1,0 +1,166 @@
+---
+# community.zabbix 4.3.0's nginx template ignores zabbix_web_vhost_listen_ip
+# and starts wildcard IPv4/IPv6 listeners. Keep package reuse, but own the small
+# web configuration locally so nginx is configured before it can be started.
+- name: Install exact Zabbix frontend packages
+  ansible.builtin.dnf:
+    name: "{{ _zabbix_integration_web_packages }}"
+    state: present
+  register: _zabbix_integration_frontend_package_transaction
+  become: true
+
+- name: Confirm verified frontend stayed loopback-only after frontend packages
+  ansible.builtin.command:
+    argv: [ss, -H, -lnt, "( sport = :8080 )"]
+  register: _zabbix_integration_frontend_listener_after_packages
+  changed_when: false
+  failed_when: >-
+    _zabbix_integration_frontend_listener_after_packages.rc != 0 or
+    _zabbix_integration_frontend_listener_after_packages.stdout_lines | length != 1 or
+    not (_zabbix_integration_frontend_listener_after_packages.stdout_lines[0] is
+    match('^LISTEN\s+\d+\s+\d+\s+127\.0\.0\.1:8080\s+'))
+  when: _zabbix_integration_frontend_secured
+
+- name: Refuse frontend package drift on a verified frontend
+  ansible.builtin.assert:
+    that:
+      - not _zabbix_integration_frontend_package_transaction.changed
+    fail_msg: >-
+      A verified frontend requires an explicit fail-closed upgrade workflow;
+      its frontend package transaction unexpectedly changed the host.
+  when: _zabbix_integration_frontend_secured
+
+- name: Stop nginx after frontend package transaction
+  ansible.builtin.service:
+    name: nginx
+    state: stopped
+  become: true
+  when: not _zabbix_integration_frontend_secured
+
+- name: Require nginx inactive after frontend package transaction
+  ansible.builtin.command: systemctl is-active nginx
+  register: _zabbix_integration_nginx_inactive_after_frontend_packages
+  changed_when: false
+  failed_when: >-
+    _zabbix_integration_nginx_inactive_after_frontend_packages.rc != 3 or
+    _zabbix_integration_nginx_inactive_after_frontend_packages.stdout != 'inactive'
+  become: true
+  when: not _zabbix_integration_frontend_secured
+
+# Mirrors the two required database/Zabbix booleans from the pinned
+# community.zabbix roles/zabbix_web/tasks/selinux.yml. LDAP is out of scope.
+- name: Permit the local web frontend to reach PostgreSQL and Zabbix
+  ansible.posix.seboolean:
+    name: "{{ item }}"
+    state: true
+    persistent: true
+  loop:
+    - httpd_can_network_connect_db
+    - httpd_can_connect_zabbix
+  become: true
+
+- name: Install fail-closed nginx main configuration
+  ansible.builtin.template:
+    src: nginx.conf.j2
+    dest: /etc/nginx/nginx.conf
+    owner: root
+    group: root
+    mode: "0644"
+  register: _zabbix_integration_nginx_main_configuration
+  become: true
+
+- name: Create fail-closed optional TLS include directory
+  ansible.builtin.file:
+    path: /etc/nginx/zabbix-tls-enabled
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+- name: Install loopback-only Zabbix nginx virtual host
+  ansible.builtin.template:
+    src: zabbix-nginx.conf.j2
+    dest: /etc/nginx/conf.d/zabbix.conf
+    owner: root
+    group: root
+    mode: "0644"
+  register: _zabbix_integration_nginx_vhost_configuration
+  become: true
+
+- name: Install dedicated Zabbix PHP-FPM pool
+  ansible.builtin.template:
+    src: zabbix-php-fpm.conf.j2
+    dest: /etc/php-fpm.d/zabbix.conf
+    owner: root
+    group: root
+    mode: "0644"
+  register: _zabbix_integration_php_fpm_configuration
+  become: true
+
+- name: Install protected Zabbix frontend database configuration
+  ansible.builtin.template:
+    src: zabbix.conf.php.j2
+    dest: /etc/zabbix/web/zabbix.conf.php
+    owner: apache
+    group: apache
+    mode: "0600"
+  become: true
+  no_log: true
+  diff: false
+
+- name: Validate nginx configuration before startup or reload
+  ansible.builtin.command: nginx -t
+  changed_when: false
+  become: true
+
+- name: Start PHP-FPM after secure configuration
+  ansible.builtin.service:
+    name: php-fpm
+    state: started
+    enabled: true
+  become: true
+
+- name: Restart PHP-FPM after verified pool configuration changes
+  ansible.builtin.service:
+    name: php-fpm
+    state: restarted
+  become: true
+  when:
+    - _zabbix_integration_frontend_secured
+    - _zabbix_integration_php_fpm_configuration.changed
+
+- name: Reload verified nginx after configuration changes
+  ansible.builtin.service:
+    name: nginx
+    state: reloaded
+  become: true
+  when:
+    - _zabbix_integration_frontend_secured
+    - _zabbix_integration_nginx_main_configuration.changed or
+      _zabbix_integration_nginx_vhost_configuration.changed
+
+- name: Unmask nginx immediately before its guarded startup
+  ansible.builtin.systemd_service:
+    name: nginx.service
+    masked: false
+  become: true
+  when: not _zabbix_integration_frontend_secured
+
+- name: Require nginx still inactive immediately before startup
+  ansible.builtin.command: systemctl is-active nginx
+  register: _zabbix_integration_nginx_inactive_before_start
+  changed_when: false
+  failed_when: >-
+    _zabbix_integration_nginx_inactive_before_start.rc != 3 or
+    _zabbix_integration_nginx_inactive_before_start.stdout != 'inactive'
+  become: true
+  when: not _zabbix_integration_frontend_secured
+
+- name: Start loopback-only nginx
+  ansible.builtin.systemd_service:
+    name: nginx.service
+    state: started
+    enabled: true
+  become: true
+  when: not _zabbix_integration_frontend_secured

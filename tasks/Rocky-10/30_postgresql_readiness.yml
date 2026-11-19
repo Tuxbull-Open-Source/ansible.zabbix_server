@@ -1,0 +1,18 @@
+---
+- name: Verify PostgreSQL service is active
+  ansible.builtin.command: systemctl is-active postgresql
+  register: _zabbix_integration_postgresql_active
+  changed_when: false
+  failed_when: _zabbix_integration_postgresql_active.stdout != 'active'
+
+- name: Read PostgreSQL listen addresses
+  become: true
+  become_user: postgres
+  ansible.builtin.command: psql -Atqc "SHOW listen_addresses"
+  register: _zabbix_integration_postgresql_listen
+  changed_when: false
+
+- name: Require localhost-only PostgreSQL
+  ansible.builtin.assert:
+    that:
+      - _zabbix_integration_postgresql_listen.stdout in ['localhost', '127.0.0.1, ::1', '::1, 127.0.0.1']

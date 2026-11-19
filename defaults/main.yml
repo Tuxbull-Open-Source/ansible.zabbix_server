@@ -1,0 +1,32 @@
+# defaults/main.yml
+---
+# Deliberately safe defaults. Secrets and package release suffixes have no defaults.
+zabbix_integration_zabbix_version: "8.0"
+zabbix_integration_postgresql_version: "16"
+zabbix_integration_timezone: UTC
+zabbix_integration_database_name: zabbix
+zabbix_integration_database_user: zabbix
+zabbix_integration_server_name: Zabbix
+zabbix_integration_server_config_path: /etc/zabbix/zabbix_server.conf
+zabbix_integration_publish: false
+# Direct publication is deliberately explicit and self-signed. The role never
+# opens a firewall; callers must authorize network access separately.
+zabbix_integration_publish_listen_ipv4: ""
+zabbix_integration_publish_server_name: ""
+zabbix_integration_publish_tls_directory: /etc/pki/tls/zabbix-integration
+zabbix_integration_publish_certificate_path: /etc/pki/tls/zabbix-integration/server.crt
+zabbix_integration_publish_private_key_path: /etc/pki/tls/zabbix-integration/server.key
+zabbix_integration_publish_certificate_days: 825
+# Renew only role-owned material. This must remain shorter than certificate_days.
+zabbix_integration_publish_certificate_renewal_days: 30
+# Explicit authorization for the one-time vendor-default credential transition.
+# A caller cannot claim completion; every enabled run reauthenticates through API.
+zabbix_integration_admin_bootstrap: false
+zabbix_integration_expected_selinux_state: Enforcing
+zabbix_integration_agent_server: 127.0.0.1
+zabbix_integration_epel_release_evr: "10-9.el10"
+zabbix_integration_fping_evr: "5.2-3.el10_0"
+zabbix_integration_selinux_policy_targeted_extra_evr: "42.1.27-2.el10_3.2"
+zabbix_integration_zabbix_selinux_policy_evr: "2:8.0.0-release1.el10"
+zabbix_integration_selinux_allow_zabbix_can_network: true
+...
